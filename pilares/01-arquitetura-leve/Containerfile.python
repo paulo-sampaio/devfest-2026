@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1.7
+# ==============================================================================
+# PILAR 01: Arquitetura Leve (Redução de Superfície, Zero Bloat & Velocidade)
+# App: "Qual a hora atual na timezone XYZ?" (Python 3.15.2 + uv 0.13.6 + Debian 13 Trixie-Slim)
+# Build (Podman):
+#   podman build -f Containerfile.python -t tz-app-python:pilar01 .
+# Exportação/Push com compressão zstd rápida no K8s:
+#   podman push --compression-format=zstd localhost/tz-app-python:pilar01 docker://seu-registry/tz-app-python:pilar01
+# ==============================================================================
+
+# [Arquitetura Leve] Binário oficial do uv na versão de patch estrita isolado em estágio próprio
+FROM ghcr.io/astral-sh/uv:0.13.6 AS uv-bin
+
+# [Arquitetura Leve] Estágio de build em Debian 13 (Trixie-Slim)
+FROM docker.io/library/debian:trixie-slim AS builder
+
+COPY --from=uv-bin /uv /uvx /bin/
+
+# [Arquitetura Leve] Pré-compilação de bytecode (.pyc) no build para acelerar o Cold Start
+# e modo 'copy' para funcionar perfeitamente com Cache Mounts em múltiplos estágios.
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_PYTHON_PREFERENCE=only-managed \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+
+WORKDIR /app
+
+# [Arquitetura Leve] Instala a versão de patch exata do Python 3.15.2 gerenciado pelo uv
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv python install 3.15.2
+
+# [Arquitetura Leve] Ordenação Inteligente de Camadas + Bind/Cache Mounts:
+# Instala dependências antes do código-fonte; alterar o HTML/Python não invalida o cache.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    uv sync --frozen --no-install-project --no-dev
+
+
+# --- ESTÁGIO FINAL: Runtime Enxuto (Debian 13 Trixie-Slim) ---
+# [Arquitetura Leve] Imagem final sem 'uv', sem 'pip', sem compiladores e sem cache.
+FROM docker.io/library/debian:trixie-slim AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# [Arquitetura Leve] Instala apenas a base IANA (tzdata) exigida pelo módulo padrão
+# 'zoneinfo' do Python 3.15 para calcular a hora atual em qualquer timezone e limpa listas apt.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+    && useradd -u 65532 -r -g nogroup -d /app -s /sbin/nologin nonroot
+
+WORKDIR /app
+
+# Copia apenas o interpretador Python 3.15 e o virtualenv com bytecode (.pyc) já compilado
+COPY --from=builder /opt/python /opt/python
+COPY --from=builder /opt/venv /opt/venv
+
+# Copia o servidor web e o template da página ("Qual a hora na timezone XYZ?")
+COPY ./app.py /app/app.py
+COPY ./template.html /app/template.html
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+USER 65532:65532
+EXPOSE 8080
+
+ENTRYPOINT ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

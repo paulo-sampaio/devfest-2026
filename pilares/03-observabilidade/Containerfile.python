@@ -1,0 +1,82 @@
+# syntax=docker/dockerfile:1.7
+# ==============================================================================
+# PILAR 03: Observabilidade "Zero-Touch"
+# App: "Qual a hora atual na timezone XYZ?" (Python 3.15.2 + uv 0.13.6 + Debian Trixie-Slim)
+# Build (Podman):
+#   podman build -f Containerfile.python -t tz-app-python:pilar03 .
+# ==============================================================================
+
+FROM ghcr.io/astral-sh/uv:0.13.6 AS uv-bin
+FROM docker.io/library/debian:trixie-slim AS builder
+
+COPY --from=uv-bin /uv /uvx /bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_PYTHON_PREFERENCE=only-managed \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+
+WORKDIR /app
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv python install 3.15.2
+
+# [Observabilidade] Instala dependências da aplicação + instrumentação OpenTelemetry
+# sem alterar uma única linha de código de negócio ("Zero-Touch Instrumentation") via uv.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    uv sync --frozen --no-install-project --no-dev && \
+    uv pip install --python /opt/venv/bin/python \
+        opentelemetry-distro \
+        opentelemetry-exporter-otlp \
+        opentelemetry-instrumentation-urllib
+
+
+# --- ESTÁGIO FINAL: Runtime Debian 13 (Trixie-Slim) Zero-Touch ---
+FROM docker.io/library/debian:trixie-slim AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# [Observabilidade] Nenhum curl, wget ou agente pesado instalado no container!
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+    && useradd -u 65532 -r -g nogroup -d /app -s /sbin/nologin nonroot
+
+WORKDIR /app
+
+COPY --from=builder --chown=65532:65532 /opt/python /opt/python
+COPY --from=builder --chown=65532:65532 /opt/venv /opt/venv
+COPY --chown=65532:65532 ./app.py /app/app.py
+COPY --chown=65532:65532 ./template.html /app/template.html
+
+# [Observabilidade]
+# - PYTHONUNBUFFERED=1: Garante que logs estruturados JSON saiam imediatamente no stdout (sem buffer)
+#   para coleta via Vector / FluentBit no nó Kubernetes.
+# - PYTHONPERFSUPPORT=1: Habilita mapas de símbolos do Python 3.15 em /tmp/perf-*.map para que
+#   profilers contínuos via eBPF (Parca / Pyroscope) identifiquem funções Python nos Flamegraphs.
+# - OTEL_PYTHON_LOG_CORRELATION=true: Injeta automaticamente trace_id e span_id nos logs JSON.
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPERFSUPPORT=1 \
+    LOG_FORMAT="json" \
+    OTEL_SERVICE_NAME="tz-app-python" \
+    OTEL_PYTHON_LOG_CORRELATION="true" \
+    OTEL_TRACES_EXPORTER="otlp" \
+    OTEL_METRICS_EXPORTER="otlp" \
+    OTEL_LOGS_EXPORTER="otlp"
+
+USER 65532:65532
+EXPOSE 8080
+
+# [Observabilidade] Sonda de Saúde Sem Shell e Sem Curl (Native Probe):
+# Executa o próprio binário do Python em modo exec (sem invocar /bin/sh) usando a stdlib 'urllib.request'.
+HEALTHCHECK --interval=10s --timeout=2s --start-period=3s --retries=3 \
+    CMD ["/opt/venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=1)"]
+
+# [Observabilidade] Wrapper 'opentelemetry-instrument' intercepta requisições HTTP automaticamente
+ENTRYPOINT ["/opt/venv/bin/opentelemetry-instrument", "/opt/venv/bin/python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -1,0 +1,78 @@
+# syntax=docker/dockerfile:1.7
+# ==============================================================================
+# PILAR 04: Gestão de Recursos (Rightsizing, Cgroups & FinOps)
+# App: "Qual a hora atual na timezone XYZ?" (Python 3.15.2 + uv 0.13.6 + jemalloc + Trixie-Slim)
+# Build (Podman):
+#   podman build -f Containerfile.python -t tz-app-python:pilar04 .
+# Run com limite estrito de memória (simulando Requests == Limits = 128MiB):
+#   podman run --rm -m 128m --memory-swap 128m -p 8080:8080 tz-app-python:pilar04
+# ==============================================================================
+
+FROM ghcr.io/astral-sh/uv:0.13.6 AS uv-bin
+FROM docker.io/library/debian:trixie-slim AS builder
+
+COPY --from=uv-bin /uv /uvx /bin/
+
+# [Gestão de Recursos] UV_COMPILE_BYTECODE=1 elimina o pico de CPU e I/O na inicialização
+# (Startup vs. Steady-State), evitando CPU Throttling nos primeiros segundos de vida do Pod.
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_PYTHON_PREFERENCE=only-managed \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+
+WORKDIR /app
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv python install 3.15.2
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    uv sync --frozen --no-install-project --no-dev
+
+
+# --- ESTÁGIO FINAL: Debian 13 (Trixie-Slim) Otimizado para Memória e Cgroups ---
+FROM docker.io/library/debian:trixie-slim AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# [Gestão de Recursos & FinOps] Instala 'libjemalloc2' junto ao 'tzdata'.
+# O alocador padrão da glibc cria múltiplas arenas por thread e retém páginas sujas,
+# causando fragmentação severa em objetos Python de curta duração (dicionários/JSON).
+# O jemalloc devolve memória imediatamente ao kernel Linux, mantendo o RSS estável.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
+    ca-certificates \
+    libjemalloc2 \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+    && useradd -u 65532 -r -g nogroup -d /app -s /sbin/nologin nonroot
+
+WORKDIR /app
+
+COPY --from=builder --chown=65532:65532 /opt/python /opt/python
+COPY --from=builder --chown=65532:65532 /opt/venv /opt/venv
+COPY --chown=65532:65532 ./app.py /app/app.py
+COPY --chown=65532:65532 ./template.html /app/template.html
+
+# [Gestão de Recursos & FinOps]
+# 1. LD_PRELOAD: Ativa jemalloc com devolução rápida de páginas (dirty_decay_ms:1000) de forma portável (multiarch).
+# 2. MALLOC_ARENA_MAX=2: Caso alguma extensão C recorra à glibc, limita as arenas a 2 em vez de (8 * núcleos do host).
+# 3. WEB_CONCURRENCY=1: Um único processo assíncrono por container; a escala é feita horizontalmente via réplicas
+#    no Kubernetes (HPA), garantindo previsibilidade total para 'Requests == Limits'.
+RUN JEMALLOC_PATH=$(find /usr/lib -name "libjemalloc.so.2" | head -n 1) && \
+    ln -sf "$JEMALLOC_PATH" /usr/lib/libjemalloc.so.2
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    LD_PRELOAD="/usr/lib/libjemalloc.so.2" \
+    MALLOC_CONF="background_thread:true,metadata_thp:auto,dirty_decay_ms:1000,muzzy_decay_ms:1000" \
+    MALLOC_ARENA_MAX="2" \
+    WEB_CONCURRENCY="1"
+
+USER 65532:65532
+EXPOSE 8080
+
+# [Gestão de Recursos] Executa com otimização de bytecode (-OO remove docstrings da RAM)
+ENTRYPOINT ["/opt/venv/bin/python", "-OO", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

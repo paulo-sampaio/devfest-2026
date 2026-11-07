@@ -1,0 +1,16 @@
+[project]
+name = "tz-python"
+version = "0.1.0"
+description = "Demo TZ Explorer em Python (uv + Starlette)"
+requires-python = ">=3.12"
+dependencies = [
+    "starlette>=0.40.0",
+    "uvicorn>=0.30.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["app.py", "template.html"]

@@ -1,0 +1,99 @@
+# syntax=docker/dockerfile:1.7
+# ==============================================================================
+# PILAR 02: DevSecOps (Blindagem do Build ao Runtime)
+# App: "Qual a hora atual na timezone XYZ?" (Python 3.15.2 + uv 0.13.6 + Debian Trixie-Slim)
+# Build (Podman com Secret Mount):
+#   podman build --secret id=netrc_creds,src=.netrc -f Containerfile.python -t tz-app-python:pilar02 .
+# ==============================================================================
+
+# [DevSecOps] Pinning estrito por tag de patch + digest SHA256 (Imutabilidade contra ataques de Supply Chain)
+FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv-bin
+FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS builder
+
+# [DevSecOps] Flags do shell para falhar imediatamente em erros dentro de pipes (Hadolint DL4006)
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+COPY --from=uv-bin /uv /uvx /bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_PYTHON_PREFERENCE=only-managed \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+
+WORKDIR /app
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv python install 3.15.2
+
+# [DevSecOps] Secret Mount: O token para baixar pacotes de um índice PyPI privado
+# é montado em memória (tmpfs) apenas durante este RUN e JAMAIS fica gravado na imagem.
+# A flag '--frozen' garante que o uv valide estritamente os hashes SHA256 do uv.lock.
+RUN --mount=type=secret,id=netrc_creds,target=/root/.netrc,mode=0600 \
+    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-install-project --no-dev
+
+COPY ./app.py /app/app.py
+COPY ./template.html /app/template.html
+COPY ./pyproject.toml ./uv.lock /app/
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev
+
+# [DevSecOps] Hardening de permissões antes de copiar: garante que o Python, o venv,
+# o código e o template sejam estritamente Read-Only (0550 diretórios/bins, 0440 arquivos).
+RUN chmod -R u=rX,g=rX,o= /opt/python /opt/venv /app/app.py /app/template.html
+
+
+# --- ESTÁGIO FINAL: Debian 13 (Trixie-Slim) Hardened ---
+FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS runtime
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# [DevSecOps] Argumentos injetados pelo CI/CD para rastreabilidade forense e vínculo com SBOM/Cosign
+ARG GIT_COMMIT="unknown"
+ARG BUILD_DATE="unknown"
+ARG VERSION="1.0.0"
+
+# [DevSecOps] Padronização OpenContainers (OCI) exigida por Políticas de Admissão (Kyverno/OPA)
+LABEL org.opencontainers.image.title="tz-app-python" \
+      org.opencontainers.image.description="Consulta de fuso horário em Python 3.15.2 (uv 0.13.6)" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.source="https://github.com/kirimure/demo-apps" \
+      security.hardening.level="trixie-slim-nonroot-ro"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# [DevSecOps] Instala tzdata + ca-certificates, cria usuário sem shell (/sbin/nologin)
+# e remove binários SUID/SGID desnecessários do sistema base para mitigar escalação de privilégio.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+    && find / -xdev -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true \
+    && useradd -u 65532 -r -g nogroup -d /app -s /sbin/nologin nonroot
+
+WORKDIR /app
+
+# Copia os artefatos com permissões restritas (Read-Only) atribuídos ao UID 65532
+COPY --from=builder --chown=65532:65532 /opt/python /opt/python
+COPY --from=builder --chown=65532:65532 /opt/venv /opt/venv
+COPY --from=builder --chown=65532:65532 /app/app.py /app/app.py
+COPY --from=builder --chown=65532:65532 /app/template.html /app/template.html
+
+# [DevSecOps] Previne carregamento de pacotes de diretórios de usuário (~/.local) ou escrita em disco
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONNOUSERSITE=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONSAFEPATH=1
+
+# [DevSecOps] Uso explícito de UID:GID numérico (> 10000) compatível com Podman rootless e K8s
+USER 65532:65532
+
+EXPOSE 8080
+
+ENTRYPOINT ["/opt/venv/bin/python", "-I", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

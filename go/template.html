@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{.Title}} - Fuso Horário & História</title>
+  <style>
+    :root {
+      --bg: #fafafa;
+      --surface: #ffffff;
+      --text-main: #18181b;
+      --text-muted: #71717a;
+      --border: #e4e4e7;
+      --accent: {{.AccentColor}};
+      --accent-light: #f4f4f5;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #09090b;
+        --surface: #18181b;
+        --text-main: #f4f4f5;
+        --text-muted: #a1a1aa;
+        --border: #27272a;
+        --accent-light: #27272a;
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.5;
+      padding: 2.5rem 1rem;
+      display: flex;
+      justify-content: center;
+    }
+    .layout {
+      width: 100%;
+      max-width: 760px;
+    }
+    header {
+      margin-bottom: 2rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 1rem;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+    }
+    .city-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 1.75rem;
+    }
+    .city-btn {
+      text-decoration: none;
+      color: var(--text-main);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 0.45rem 0.85rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: all 0.15s ease;
+    }
+    .city-btn:hover {
+      border-color: var(--text-muted);
+    }
+    .city-btn.active {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.75rem;
+      margin-bottom: 1.5rem;
+    }
+    .time-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 0.75rem;
+    }
+    .time-city {
+      font-size: 1.25rem;
+      font-weight: 600;
+    }
+    .time-country {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+    .clock-display {
+      font-size: 2.75rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.03em;
+      margin: 0.5rem 0;
+      color: var(--accent);
+    }
+    .date-display {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      margin-bottom: 1.25rem;
+    }
+    .fact-box {
+      background: var(--accent-light);
+      border-left: 3px solid var(--accent);
+      padding: 1rem;
+      border-radius: 4px;
+      font-size: 0.9rem;
+      color: var(--text-main);
+    }
+    .fact-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 0.35rem;
+    }
+    footer {
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border);
+      padding-top: 1rem;
+      margin-top: 2rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <header>
+      <h1>{{.Title}}</h1>
+      <p class="subtitle">Fusos horários globais e fatos históricos curiosos</p>
+    </header>
+
+    <nav class="city-nav">
+      {{range .Cities}}
+        <a href="/?tz={{.ID}}" class="city-btn {{if .IsActive}}active{{end}}">
+          {{.Flag}} {{.Name}}
+        </a>
+      {{end}}
+    </nav>
+
+    <section class="card">
+      <div class="time-header">
+        <span class="time-city">{{.ActiveCity.Flag}} {{.ActiveCity.Name}}</span>
+        <span class="time-country">{{.ActiveCity.Country}} &bull; {{.ActiveCity.Timezone}}</span>
+      </div>
+      <div class="clock-display">{{.ActiveCity.CurrentTime}}</div>
+      <div class="date-display">{{.ActiveCity.CurrentDate}} ({{.ActiveCity.Offset}})</div>
+
+      <div class="fact-box">
+        <div class="fact-label">Fato Histórico Curioso</div>
+        <p>{{.ActiveCity.HistoricalFact}}</p>
+      </div>
+    </section>
+
+    <footer>
+      <span>Runtime: <strong>{{.RuntimeInfo}}</strong></span>
+      <span>Cold Start: <strong>{{.ColdStartMs}} ms</strong></span>
+      <span>Host: <strong>{{.Hostname}}</strong></span>
+    </footer>
+  </div>
+</body>
+</html>
